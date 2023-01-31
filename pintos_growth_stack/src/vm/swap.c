@@ -1,52 +1,81 @@
-#include "swap.h"
-#include "devices/block.h"
+
+#include "vm/page.h"
+#include "vm/frame.h"
+#include <list.h>
 #include <bitmap.h>
-#include <debug.h>
-static struct block* swap_device;
-static struct bitmap* swap_free_map;
-static struct lock swap_lock;
-void swap_out(struct kpage_t* page){
-    int i;
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <list.h>
+#include "filesys/directory.h"
+#include "filesys/file.h"
+#include "filesys/filesys.h"
+#include "threads/flags.h"
+#include "threads/init.h"
+#include "threads/interrupt.h"
+#include "threads/palloc.h"
+#include "threads/thread.h"
+#include "threads/vaddr.h"
+#include "vm/frame.h"
+#include "vm/swap.h"
+#include "vm/page.h"
+#include "userprog/process.h"
+#include "userprog/pagedir.h"
+#include "threads/palloc.h"
+#include "threads/switch.h"
+#include "threads/synch.h"
+#include "threads/vaddr.h"
+#include "devices/block.h"
 
-    lock_acquire(&swap_lock);    
-    block_sector_t sector=bitmap_scan_and_flip(swap_free_map,0,SECTOR_PER_PAGE,false);
-    for(i=0;i<SECTOR_PER_PAGE;i++){
-        block_write(swap_device,(sector+i),page->kaddr + (i*BLOCK_SECTOR_SIZE)); 
+struct bitmap *swap_map;
+struct lock swap_lock1;
+struct block *swap_block;
+// swap 초기화
+void init_swap(){
+
+    //swap_block = block_get_role(BLOCK_SWAP);
+    //if(swap_block != NULL){
+        swap_map = bitmap_create(8*1024);
+   // }
+    
+    lock_init(&swap_lock1);
+}
+
+//swap in
+void swap_in(size_t index, void *kaddr){
+    
+    lock_acquire(&swap_lock1);
+    swap_block = block_get_role(BLOCK_SWAP);
+
+    if(bitmap_test(swap_map, index)){
+        // bitmap이 존재하면
+        for(int i= 0; i<(size_t)(PGSIZE/BLOCK_SECTOR_SIZE); i++){
+            block_read(swap_block, (size_t)(PGSIZE/BLOCK_SECTOR_SIZE)*index+i, (uint8_t*)kaddr + BLOCK_SECTOR_SIZE*i);
+            // block 읽어서 메모리로 load
+        }
+        bitmap_reset(swap_map, index);
     }
-    lock_release(&swap_lock);
-    page->vme->swap_sector=sector;
-
+    lock_release(&swap_lock1);
 }
-void swap_in(struct kpage_t* page){
-    int i;
-    // ASSERT(page->vme->swap_sector!=-1);
-    EXPECT_NE(page->vme->swap_sector,-1);
-    lock_acquire(&swap_lock);
-    memset(page->kaddr,0,PGSIZE);
-    bitmap_set_multiple(swap_free_map,page->vme->swap_sector,SECTOR_PER_PAGE,false);
-    for(i=0;i<SECTOR_PER_PAGE;i++){
-        block_read(swap_device, page->vme->swap_sector+i ,page->kaddr + (i*BLOCK_SECTOR_SIZE));
+
+// swap out
+size_t swap_out(void *kaddr){
+
+lock_acquire(&swap_lock1);
+    swap_block = block_get_role(BLOCK_SWAP);
+    //first fit algorithm -> 가장 앞 false
+    size_t swap_num = bitmap_scan(swap_map, 0, 1, false);
+    
+    if(swap_num == BITMAP_ERROR){
+        lock_release(&swap_lock1);
+        return swap_num;
     }
-    lock_release(&swap_lock);
-    page->vme->swap_sector=NOT_IN_SWAP;
-}
-
-void swap_free(struct kpage_t* page){
-    if(page->vme->swap_sector==NOT_IN_SWAP||page->vme->loaded_on_phys==true){
-        return;
+    
+    for(int i = 0; i< (size_t)(PGSIZE/BLOCK_SECTOR_SIZE); i ++){
+        block_write(swap_block, (size_t)(PGSIZE/BLOCK_SECTOR_SIZE)*swap_num+i, (uint8_t *)kaddr+ BLOCK_SECTOR_SIZE*i);
     }
-    lock_acquire(&swap_lock);
-    bitmap_set_multiple(swap_free_map,page->vme->swap_sector,SECTOR_PER_PAGE,false);
-    lock_release(&swap_lock);
+    bitmap_set(swap_map, swap_num, true);
+    lock_release(&swap_lock1);
+    return swap_num;
 }
 
-void swap_init(void){
-    swap_device=block_get_role(BLOCK_SWAP);
-    if (swap_device == NULL)
-        PANIC ("No file swap device found, can't initialize file swap.");
-    swap_free_map=bitmap_create(block_size(swap_device));
-    bitmap_set_all(swap_free_map,false);
-    if (swap_free_map == NULL)
-        PANIC ("bitmap creation failed--swap device is too large");
-    lock_init(&swap_lock);
-}
