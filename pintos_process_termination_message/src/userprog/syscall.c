@@ -1,5 +1,4 @@
 #include "userprog/syscall.h"
-
 #include <stdio.h>
 #include <syscall-nr.h>
 #include <user/syscall.h>
@@ -13,18 +12,20 @@
 #include "devices/shutdown.h"
 #include "devices/input.h"
 #include "vm/page.h"
-
-#define MAX_SYSCALL_NR 17
-#define STDIN_FILENO 0
-#define STDOUT_FILENO 1
-#define STDERR_FILENO 2
+#define Max_Sys 17
+#define STDIN 0
+#define STDOUT 1
 typedef void syscall_handler_func (struct intr_frame*);
+/* These are defined in threads/thread.c */
+/*
+extern struct list open_file_list;
+extern int file_open_count;
+*/
 
-// struct list open_file_list;
 
 struct syscall_handler_t {
   syscall_handler_func* func;
-  char name[128]; // for debuging
+  char name[80]; // for debuging
   char argc;
 };
 
@@ -99,8 +100,9 @@ static void syscall_mmap(struct intr_frame* f);
 
 static void syscall_munmap(struct intr_frame* f);
 
+//Những cái có 1 đối số bắt đầu từ esp + 4 và những cái có 2 đối số trở lên bắt đầu từ esp + 20 .
 struct syscall_handler_t syscall_handlers[]=
-                      {{syscall_halt,"halt",0},{syscall_exit,"exit",1},{syscall_exec,"exec",1},
+                      {{syscall_halt,"halt",0 /*args number 0*/},{syscall_exit,"exit",1},{syscall_exec,"exec",1},
                         {syscall_wait,"wait",1},{syscall_create,"create",2},{syscall_remove,"remove",1},
                         {syscall_open,"open",1},{syscall_filesize,"filesize",1},{syscall_read,"read",1},
                         {syscall_write,"write",3},{syscall_seek,"seek",2},{syscall_tell,"tell",1},
@@ -111,7 +113,7 @@ struct syscall_handler_t syscall_handlers[]=
 static inline bool is_valid_vaddr(uint32_t * esp){
 
   int i;
-  if(*esp>MAX_SYSCALL_NR){
+  if(*esp>Max_Sys){
     return false;
   }
   if(!is_user_vaddr(esp)){
@@ -158,6 +160,8 @@ static void syscall_halt(struct intr_frame* f)
 
 static void syscall_exit(struct intr_frame* f)
 {
+  printf("%s: exit(%d)\n", thread_name(), f);
+   // thread_current() -> status = THREAD_DYING; / * Điều này được xử lý trong Thread_exit () */
   uint32_t* esp= f->esp;
   thread_current()->exit_status=*(++esp);
   thread_exit();
@@ -176,6 +180,8 @@ static void syscall_wait(struct intr_frame* f)
 {
   uint32_t* esp= f->esp;
   int tid=*(++esp);
+
+//printf(" SYSCALL: wait \n");
   f->eax=process_wait(tid);
 }
 
@@ -207,6 +213,7 @@ static void syscall_remove(struct intr_frame* f)
 
 static void syscall_open(struct intr_frame* f)
 {  
+  //printf(" SYSCALL: open \n");
   uint32_t* esp= f->esp;
   const char* file=*(++esp);
   struct thread* cur=thread_current();
@@ -223,10 +230,11 @@ static void syscall_open(struct intr_frame* f)
   sema_up(file_handle_lock);
   if(file_struct==NULL){
     f->eax=-1;
+     /* open failed */
   }else{
     file_struct->fd=++cur->cur_max_fd;
     f->eax=file_struct->fd;
-    // list_push_back(&cur->open_file_list,&file_struct->elem);
+    // Mô tả tệp được đánh số 0 và 1 được dành cho bảng điều khiển
   }
 }
 
@@ -256,11 +264,13 @@ static void syscall_read(struct intr_frame* f)
     _exit(-1);
   }
   
-  if(fd==STDOUT_FILENO||fd<0){
+  if(fd==STDOUT||fd<0){
     _exit(-1);
   }
 
-  if(fd==STDIN_FILENO){
+  if(fd==STDIN){
+
+  /* Fd 0 reads from the keyboard using input_getc(). */
     uint8_t ch;
     int i=0;
     sema_down(file_handle_lock);
@@ -276,6 +286,7 @@ static void syscall_read(struct intr_frame* f)
 
   if(file_struct==NULL){
     _exit(-1);
+     /* -1 if the file could not be read (due to a condition other than end of file) */
   }else{
     sema_down(file_handle_lock);
     f->eax=file_read(file_struct,buffer,size);
@@ -294,7 +305,9 @@ static void syscall_write(struct intr_frame* f)
     ret=-1;
   }
   
-  if(fd==STDOUT_FILENO){
+  if(fd==STDOUT){
+    /* putbuf() Sử dụng chức năng để nhập nội dung của bộ đệm vào bảng điều khiển.
+     Tại thời điểm này, bạn phải trả lại vòng lặp nhiều như kích thước bạn cần.. */
     putbuf(buffer,size);
   }else{
     struct file* file =find_file_by_fd(fd,thread_current());
@@ -311,15 +324,7 @@ static void syscall_write(struct intr_frame* f)
       // ret=file_write(file,buffer,size);
     }
   }
-  // asm volatile
-  // (
-  //   "movl %1, %%eax\n\t"
-  //   "movl %%eax, %0\n\t"
-  //   :"=m"(check)
-  //   :"m"(size)
-  //   :"eax"
-  // );
-  // ASSERT(check==size);
+  
   f->eax=ret;
 }
 
@@ -425,6 +430,7 @@ static void syscall_mmap(struct intr_frame* f){
     }
     if(vaddr>=LOADER_PHYS_BASE-ULIMIT){
       // printf("4 base addr %p  vaddr %p\n",addr,vaddr);
+      
       f->eax=MAP_FAILED;
       return;
     }
